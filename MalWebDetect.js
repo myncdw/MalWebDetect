@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         恶意网站检测
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  使用URLhaus查询，查询结果缓存24h，支持在菜单手动提交，支持IDN/rn→m检测，需要按下ALT+C才能触发URLhaus查询，IDN混淆检测自动运行
+// @version      1.5
+// @description  使用URLhaus查询，查询结果缓存24h，支持在菜单手动提交，支持IDN/rn→m检测，IDN混淆检测自动运行
 // @author       myncdw
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -24,6 +24,7 @@
     const APIKEY_KEY = 'urlhaus_api_key';
     const RULES_KEY = 'urlhaus_confusable_rules';
     const WHOLE_DOMAIN_KEY = 'urlhaus_whole_domain'; // 新增：存储是否只检测域名的设置
+    const AUTO_CHECK_KEY = 'urlhaus_auto_check'; // 新增：存储是否自动检测的设置
     const EXPIRE_TIME = 24 * 60 * 60 * 1000; // 24小时
 
     /* ===================== IDN / 混淆规则 ===================== */
@@ -52,6 +53,16 @@
     // 保存是否只检测域名的设置
     function saveWholeDomainSetting(value) {
         GM_setValue(WHOLE_DOMAIN_KEY, value);
+    }
+
+    // 获取是否自动检测的设置
+    function getAutoCheckSetting() {
+        return GM_getValue(AUTO_CHECK_KEY, false); // 默认不自动检测
+    }
+
+    // 保存是否自动检测的设置
+    function saveAutoCheckSetting(value) {
+        GM_setValue(AUTO_CHECK_KEY, value);
     }
 
     /* ===================== 快捷键触发URLhaus检测 ===================== */
@@ -279,7 +290,7 @@
 
     /* ===================== URL 查询 ===================== */
 
-    function checkURL(wholeDomain) {
+    function checkURL(wholeDomain, isAutoCheck = false) {
         let raw;
 
         if (wholeDomain === true) {
@@ -292,7 +303,9 @@
         if (!raw || !/^https?:\/\//i.test(raw)) return;
 
         if (isLocalAddress(raw)) {
-            showToast(`🟢 局域网/本机地址`, '#4caf50');
+            if (!isAutoCheck) {
+                showToast(`🟢 局域网/本机地址`, '#4caf50');
+            }
             return;
         }
 
@@ -309,12 +322,18 @@
             if (!cached.safe) {
                 showMaliciousOverlay({ ...cached, remainH }, true);
             } else {
-                showToast(`🟢 URLhaus 缓存确认安全（剩余 ${remainH}h）`, '#4caf50');
+                // 只在手动检测时显示安全提示
+                if (!isAutoCheck) {
+                    showToast(`🟢 URLhaus 缓存确认安全（剩余 ${remainH}h）`, '#4caf50');
+                }
             }
             return;
         }
 
-        showToast('🔵 正在实时查询 URLhaus', '#2196f3');
+        // 只在手动检测时显示查询提示
+        if (!isAutoCheck) {
+            showToast('🔵 正在实时查询 URLhaus', '#2196f3');
+        }
 
         GM_xmlhttpRequest({
             method: 'POST',
@@ -350,14 +369,21 @@
                             urlStatus: null,
                             submitted: false
                         });
-                        showToast('🟢 URLhaus 实时查询：未发现威胁', '#4caf50');
+                        // 只在手动检测时显示安全提示
+                        if (!isAutoCheck) {
+                            showToast('🟢 URLhaus 实时查询：未发现威胁', '#4caf50');
+                        }
                     }
                 } catch (e) {
-                    showToast('❌ 查询失败：响应解析错误', '#f44336');
+                    if (!isAutoCheck) {
+                        showToast('❌ 查询失败：响应解析错误', '#f44336');
+                    }
                 }
             },
             onerror: () => {
-                showToast('❌ 查询失败：网络错误', '#f44336');
+                if (!isAutoCheck) {
+                    showToast('❌ 查询失败：网络错误', '#f44336');
+                }
             }
         });
     }
@@ -418,18 +444,23 @@
                 '&comment=' + encodeURIComponent(comment.trim()),
             onload: () => {
                 alert('✅ 已提交到 URLhaus');
-                if (cached) {
-                    cached.submitted = true;
-                    cached.time = Date.now();
-                    saveCache(cached);
-                }
+                // 提交后标记为危险
+                const newEntry = {
+                    url,
+                    time: Date.now(),
+                    safe: false,
+                    threat: 'user_submitted',
+                    tags: [comment.trim()],
+                    urlStatus: 'submitted',
+                    submitted: true
+                };
+                saveCache(newEntry);
             },
             onerror: () => {
                 alert('❌ 提交失败：网络错误');
             }
         });
     }
-
     /* ===================== 设置 UI ===================== */
 
     function openSettingsUI() {
@@ -468,14 +499,25 @@
             <hr style="border:none;border-top:1px solid #333;margin:20px 0">
 
             <h3>🌐 检测模式</h3>
-            <div style="background:#1a1a1a;padding:16px;border-radius:8px">
+            <div style="background:#1a1a1a;padding:16px;border-radius:8px;margin-bottom:16px">
                 <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
                     <input type="checkbox" id="wholeDomainCheck"
                         style="width:18px;height:18px;cursor:pointer">
                     <span>仅检测域名</span>
                 </label>
                 <p style="font-size:12px;color:#aaa;margin:10px 0 0 28px">
-                    启用后只检测域名部分，忽略路径和参数。这样可以减少重复查询，提高缓存命中率。
+                    启用后只检测域名部分，忽略路径和参数。这样可以减少重复查询，提高缓存命中率，但是部分网站可能误判。
+                </p>
+            </div>
+
+            <div style="background:#1a1a1a;padding:16px;border-radius:8px">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+                    <input type="checkbox" id="autoCheckbox"
+                        style="width:18px;height:18px;cursor:pointer">
+                    <span>自动检测</span>
+                </label>
+                <p style="font-size:12px;color:#aaa;margin:10px 0 0 28px">
+                    启用后页面加载时自动查询 URLhaus。关闭后需要按 <kbd style="background:#333;padding:2px 6px;border-radius:3px">Alt+C</kbd> 手动触发检测。IDN/混淆不受此项影响。
                 </p>
             </div>
 
@@ -532,6 +574,14 @@
         wholeDomainCheckbox.onchange = (e) => {
             saveWholeDomainSetting(e.target.checked);
             showToast(`检测模式已${e.target.checked ? '切换为仅域名' : '切换为完整URL'}`, '#4caf50');
+        };
+
+        // 自动检测设置
+        const autoCheckbox = panel.querySelector('#autoCheckbox');
+        autoCheckbox.checked = getAutoCheckSetting();
+        autoCheckbox.onchange = (e) => {
+            saveAutoCheckSetting(e.target.checked);
+            showToast(`自动检测已${e.target.checked ? '启用' : '关闭'}`, '#4caf50');
         };
 
         // 渲染规则列表
@@ -672,8 +722,16 @@
             sessionStorage.setItem('__original_url', location.href);
         }
 
-        // 页面加载后自动检测IDN混淆
+        // 页面加载后自动检测IDN混淆（始终执行）
         setTimeout(autoCheckConfusable, 800);
+
+        // 如果启用了自动检测，则自动进行 URLhaus 查询
+        if (getAutoCheckSetting()) {
+            setTimeout(() => {
+                const wholeDomain = getWholeDomainSetting();
+                checkURL(wholeDomain, true); // 传入 true 表示自动检测
+            }, 1000);
+        }
     });
 
 })();
